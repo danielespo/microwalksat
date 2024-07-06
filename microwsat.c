@@ -1,49 +1,39 @@
-/*********************************************************************[microwsat.c]***
-
-  The MIT License
-
-  Copyright (c) 2024 Daniel Alberto Espinosa Gonzalez (wsat algo plus updated datastructs)
-  Copyright (c) 2014-2018 Marijn Heule (parser in microsat.c)
-
-  Permission is hereby granted, free of charge, to any person obtaining a copy
-  of this software and associated documentation files (the "Software"), to deal
-  in the Software without restriction, including without limitation the rights
-  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-  copies of the Software, and to permit persons to whom the Software is
-  furnished to do so, subject to the following conditions:
-
-  The above copyright notice and this permission notice shall be included in all
-  copies or substantial portions of the Software.
-
-  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-  SOFTWARE.
-
-*************************************************************************************/
-
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <time.h>
+#include <string.h>
 
-enum {UNSAT = 0, SAT = 1};
+#define UNSAT 0
+#define SAT 1
+#define DEFAULT_MAX_TRIES 5
+#define DEFAULT_MAX_FLIPS 100
+#define DEFAULT_NOISE 0.4
 
-typedef struct {int **clauses;int numClauses;int numVariables;
+typedef struct {
+    int **clauses;
+    int numClauses;
+    int numVariables;
 } CNF;
 
-typedef struct {CNF cnf; int *model; int maxTries; int maxFlips; float noise;
-} solver;
+typedef struct {
+    CNF cnf;
+    int *model;
+    int maxTries;
+    int maxFlips;
+    float noise;
+} Solver;
 
-// memory
-int* getMemory(int size) {
-    int* ptr = (int*)malloc(sizeof(int) * size);
-    if (ptr == NULL) {fprintf(stderr, "Memory allocation failed\n");exit(1);}
+void* safeAlloc(size_t size) {
+    void* ptr = malloc(size);
+    if (ptr == NULL) {
+        fprintf(stderr, "Memory allocation failed\n");
+        exit(EXIT_FAILURE);
+    }
     return ptr;
 }
 
-void freeSolver(solver* S) { //prevent memory leaks
+void freeSolver(Solver* S) {
     for (int i = 0; i < S->cnf.numClauses; i++) {
         free(S->cnf.clauses[i]);
     }
@@ -51,59 +41,92 @@ void freeSolver(solver* S) { //prevent memory leaks
     free(S->model);
 }
 
-// prealloc solver memory and structs
-void initWSAT(solver* S, int n, int m) {
+void initSolver(Solver* S, int n, int m, int maxTries, int maxFlips) {
     S->cnf.numVariables = n;
     S->cnf.numClauses = m;
-    S->model = getMemory(n + 1);
-    S->maxTries = 5;
-    S->maxFlips = 100;
-    S->noise = 0.4;
+    S->model = safeAlloc((n + 1) * sizeof(int));
+    S->maxTries = maxTries;
+    S->maxFlips = maxFlips;
+    S->noise = DEFAULT_NOISE;
     for (int i = 1; i <= n; i++) {
-        S->model[i] = rand() % 2; //random assignment to start with (phase)
+        S->model[i] = rand() % 2;
     }
 }
 
-// parser from microsat, thanks Marijn Heule :)
-int parse(solver* S, char* filename) {
+int parse(Solver* S, const char* filename) {
     FILE* input = fopen(filename, "r");
     if (!input) {
-        printf("Error opening file\n");
+        fprintf(stderr, "Error opening file %s\n", filename);
         return 0;
     }
 
-    int nVars, nClauses;
-    fscanf(input, " p cnf %d %d \n", &nVars, &nClauses);
+    int nVars = 0, nClauses = 0;
+    char line[1024];
 
-    initWSAT(S, nVars, nClauses);
+    // Read lines until we find the problem line
+    while (fgets(line, sizeof(line), input)) {
+        if (line[0] == 'c') continue; // Skip comment lines
+        if (sscanf(line, "p cnf %d %d", &nVars, &nClauses) == 2) break;
+    }
 
-    S->cnf.clauses = (int**)malloc(nClauses * sizeof(int*));
+    if (nVars == 0 || nClauses == 0) {
+        fprintf(stderr, "Error: Invalid or missing problem line\n");
+        fclose(input);
+        return 0;
+    }
 
+    initSolver(S, nVars, nClauses, S->maxTries, S->maxFlips);
+
+    S->cnf.clauses = safeAlloc(nClauses * sizeof(int*));
     for (int i = 0; i < nClauses; i++) {
-        S->cnf.clauses[i] = (int*)malloc((nVars + 1) * sizeof(int));
-        int lit, size = 0;
-        while (fscanf(input, " %d ", &lit) && lit != 0) {
-            S->cnf.clauses[i][size++] = lit;
+        S->cnf.clauses[i] = safeAlloc((nVars + 1) * sizeof(int));
+    }
+
+    int clauseIndex = 0;
+    int var;
+    int clauseSize = 0;
+
+    while (fscanf(input, "%d", &var) == 1) {
+        if (var == 0) {
+            if (clauseSize > 0) {
+                S->cnf.clauses[clauseIndex][clauseSize] = 0; // End of clause marker
+                clauseIndex++;
+                clauseSize = 0;
+            }
+        } else {
+            if (clauseIndex >= nClauses) {
+                fprintf(stderr, "Error: More clauses than specified\n");
+                fclose(input);
+                freeSolver(S);
+                return 0;
+            }
+            S->cnf.clauses[clauseIndex][clauseSize++] = var;
         }
-        S->cnf.clauses[i][size] = 0; // End of clause marker
+    }
+
+    if (clauseIndex != nClauses) {
+        fprintf(stderr, "Error: Fewer clauses than specified\n");
+        fclose(input);
+        freeSolver(S);
+        return 0;
     }
 
     fclose(input);
     return 1;
 }
 
-int evaluateClause(int* clause, int* model) { // eval a literal against the model
+int evaluateClause(const int* clause, const int* model) {
     for (int i = 0; clause[i] != 0; i++) {
         int lit = clause[i];
-        if ((lit > 0 && model[abs(lit)] == 1) || (lit < 0 && model[abs(lit)] == 0)) {
+        if ((lit > 0 && model[lit] == 1) || (lit < 0 && model[-lit] == 0)) {
             return 1;
         }
     }
     return 0;
 }
 
-int pickRandomUnsatisfiedClause(solver* S) {
-    int* unsatisfiedClauses = (int*)malloc(S->cnf.numClauses * sizeof(int));
+int pickRandomUnsatisfiedClause(const Solver* S) {
+    int* unsatisfiedClauses = safeAlloc(S->cnf.numClauses * sizeof(int));
     int count = 0;
     for (int i = 0; i < S->cnf.numClauses; i++) {
         if (!evaluateClause(S->cnf.clauses[i], S->model)) {
@@ -111,24 +134,21 @@ int pickRandomUnsatisfiedClause(solver* S) {
         }
     }
 
-    if (count == 0) {
-        free(unsatisfiedClauses);
-        return -1;
+    int clauseIndex = -1;
+    if (count > 0) {
+        clauseIndex = unsatisfiedClauses[rand() % count];
     }
-
-    int clauseIndex = unsatisfiedClauses[rand() % count];
     free(unsatisfiedClauses);
     return clauseIndex;
 }
 
-int pickVariableToFlip(solver* S, int* clause) { 
+int pickVariableToFlip(const Solver* S, const int* clause) {
     if ((float)rand() / RAND_MAX < S->noise) {
-        int i = 0;
-        // random walk: flip a random variable in the clause
-        while (clause[i] != 0) i++;
-        return clause[rand() % i];
-    } else { // greedy move: pick best variable to flip based on break count (how many clauses falsified iff flip)
-        int bestVar = clause[0];
+        int clauseLength = 0;
+        while (clause[clauseLength] != 0) clauseLength++;
+        return abs(clause[rand() % clauseLength]);
+    } else {
+        int bestVar = abs(clause[0]);
         int bestBreakCount = S->cnf.numClauses;
 
         for (int i = 0; clause[i] != 0; i++) {
@@ -136,15 +156,16 @@ int pickVariableToFlip(solver* S, int* clause) {
             int breakCount = 0;
 
             for (int j = 0; j < S->cnf.numClauses; j++) {
-                if (S->cnf.clauses[j] != clause) {
-                    int satisfied = 0;
+                if (evaluateClause(S->cnf.clauses[j], S->model)) {
+                    int wouldBreak = 1;
                     for (int k = 0; S->cnf.clauses[j][k] != 0; k++) {
-                        if (S->model[abs(S->cnf.clauses[j][k])] == (S->cnf.clauses[j][k] > 0)) {
-                            satisfied = 1;
+                        int lit = S->cnf.clauses[j][k];
+                        if (abs(lit) != var && ((lit > 0 && S->model[lit] == 1) || (lit < 0 && S->model[-lit] == 0))) {
+                            wouldBreak = 0;
                             break;
                         }
                     }
-                    if (!satisfied) breakCount++;
+                    if (wouldBreak) breakCount++;
                 }
             }
 
@@ -157,59 +178,77 @@ int pickVariableToFlip(solver* S, int* clause) {
     }
 }
 
-void flipVariable(solver* S, int var) {
-    S->model[var] = !S->model[var];
+void flipVariable(Solver* S, int var) {
+    S->model[var] = 1 - S->model[var];
 }
 
-int solve(solver* S) {
-
+int solve(Solver* S) {
     for (int i = 0; i < S->maxTries; i++) {
-        for (int j = 1; j <= S->cnf.numVariables; j++) { //rephase everything each try
+        for (int j = 1; j <= S->cnf.numVariables; j++) {
             S->model[j] = rand() % 2;
         }
         for (int k = 0; k < S->maxFlips; k++) {
-            
-            // Check if the current model satisfies the CNF
-            int satisfied = 1;
-            for (int c = 0; c < S->cnf.numClauses; c++) {
-                if (!evaluateClause(S->cnf.clauses[c], S->model)) {
-                    satisfied = 0;
-                    break;
-                }
-            }
-            if (satisfied) {
-                return SAT;
-            }
             int clauseIndex = pickRandomUnsatisfiedClause(S);
-            if (clauseIndex == -1) return SAT; //if no unsat clauses, return SAT
+            if (clauseIndex == -1) return SAT;
 
             int* clause = S->cnf.clauses[clauseIndex];
             int varToFlip = pickVariableToFlip(S, clause);
-            flipVariable(S, abs(varToFlip));
+            flipVariable(S, varToFlip);
         }
     }
+    return UNSAT;
+}
 
-    return UNSAT; //else, return UNSAT
+void printModel(const Solver* S) {
+    printf("v");
+    for (int i = 1; i <= S->cnf.numVariables; i++) {
+        printf(" %d", S->model[i] ? i : -i);
+    }
+    printf(" 0\n");
 }
 
 int main(int argc, char** argv) {
-    if (argc <= 1) {
-        printf("No input file provided\n");
-        return 1;
+    int maxTries = DEFAULT_MAX_TRIES;
+    int maxFlips = DEFAULT_MAX_FLIPS;
+    int opt;
+
+    while ((opt = getopt(argc, argv, "t:f:")) != -1) {
+        switch (opt) {
+            case 't':
+                maxTries = atoi(optarg);
+                break;
+            case 'f':
+                maxFlips = atoi(optarg);
+                break;
+            default:
+                fprintf(stderr, "Usage: %s [-t maxTries] [-f maxFlips] <input_file>\n", argv[0]);
+                exit(EXIT_FAILURE);
+        }
     }
 
-    solver S;
-    if (!parse(&S, argv[1])) {
-        printf("Failed to parse input file\n");
-        return 1;
+    if (optind >= argc) {
+        fprintf(stderr, "Expected input file after options\n");
+        exit(EXIT_FAILURE);
     }
 
-    if (solve(&S)) {
+    Solver S = {0};
+    S.maxTries = maxTries;
+    S.maxFlips = maxFlips;
+
+    if (!parse(&S, argv[optind])) {
+        fprintf(stderr, "Failed to parse input file\n");
+        return EXIT_FAILURE;
+    }
+
+    srand(time(NULL));
+
+    if (solve(&S) == SAT) {
         printf("s SATISFIABLE\n");
+        printModel(&S);
     } else {
-        printf("s UNSATISFIABLE\n");
+        printf("s OUT OF TIME\n");
     }
 
-    freeSolver(&S);// & is the address-of operator in C
-    return 0;
+    freeSolver(&S);
+    return EXIT_SUCCESS;
 }
