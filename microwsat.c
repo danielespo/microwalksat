@@ -4,7 +4,7 @@
 #include <time.h>
 #include <string.h>
 
-#define UNSAT 0
+#define OOT 0
 #define SAT 1
 #define DEFAULT_MAX_TRIES 5
 #define DEFAULT_MAX_FLIPS 100
@@ -196,7 +196,7 @@ int solve(Solver* S) {
             flipVariable(S, varToFlip);
         }
     }
-    return UNSAT;
+    return OOT;
 }
 
 void printModel(const Solver* S) {
