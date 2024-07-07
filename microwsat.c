@@ -8,7 +8,7 @@
 #define SAT 1
 #define DEFAULT_MAX_TRIES 5
 #define DEFAULT_MAX_FLIPS 100
-#define DEFAULT_NOISE 0.4
+#define DEFAULT_NOISE 0.57 //updated based on the handbook of SAT 2e
 
 typedef struct {
     int **clauses;
