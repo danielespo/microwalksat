@@ -1,4 +1,4 @@
-# microwalksat
+# MicroWalkSAT: A Simple WSAT/SKC SAT Solver
 
 Compile using:
 
